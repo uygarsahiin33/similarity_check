@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import os, io
 import numpy as np
 import pandas as pd
@@ -11,9 +10,7 @@ from sklearn.preprocessing import OneHotEncoder, RobustScaler, normalize
 from sklearn.neighbors import NearestNeighbors
 import plotly.graph_objects as go
 
-# ================================
-# 1) Şema ve yardımcılar
-# ================================
+# scheme
 REQUIRED_COLUMNS = [
     "store_code","store_name",
     "product_id","product_name","store_format",
@@ -37,9 +34,7 @@ def _clean_text_cols(df, cols):
         df[c] = df[c].astype(str).str.strip().replace({"nan": ""})
     return df
 
-# ================================
-# 2) Veri yükleme
-# ================================
+# data uploading part
 def load_campaign_excel(path_or_buf):
     df = pd.read_excel(path_or_buf, dtype=str)
 
@@ -58,9 +53,7 @@ def load_campaign_excel(path_or_buf):
     df = _clean_text_cols(df, text_cols)
     return df, day_cols
 
-# ================================
-# 3) Ürün düzeyi öznitelikler (VEKTÖRİZE)
-# ================================
+# vectorization
 def fe_time_series_per_product(df, day_cols, store_filter: str | None = None):
     if store_filter is not None:
         df = df[df["store_code"].astype(str) == str(store_filter)].copy()
@@ -68,7 +61,7 @@ def fe_time_series_per_product(df, day_cols, store_filter: str | None = None):
     id_cols = ["product_id","product_name","brand",
                "first_category","second_category","third_category","fourth_category"]
 
-    # ---- Zaman serisi istatistikleri ----
+    # time series
     arr = df[day_cols].to_numpy(dtype=np.float32)
     n = arr.shape[1]
     x = np.arange(1, n+1, dtype=np.float32)
@@ -85,12 +78,12 @@ def fe_time_series_per_product(df, day_cols, store_filter: str | None = None):
     denom = (x_centered**2).sum() + EPS
     slope = (y_centered * x_centered).sum(axis=1) / denom
 
-    # dönem payları
+    # early, mid, late periods contributions
     early = arr[:, :4].sum(axis=1)   / (total + EPS)
     mid   = arr[:, 4:10].sum(axis=1) / (total + EPS)
     late  = arr[:, 10:].sum(axis=1)  / (total + EPS)
 
-    # shape (d1..dN)
+    # (d1..dN)
     shape = (arr / (total[:, None] + EPS)).astype(np.float32)
     shape_df = pd.DataFrame(shape, columns=[f"ts_shape_d{i+1}" for i in range(n)])
 
@@ -129,9 +122,8 @@ def fe_time_series_per_product(df, day_cols, store_filter: str | None = None):
     prod["product_id"] = prod["product_id"].astype(str)
     return prod
 
-# ================================
-# 4) Model (Overall cosine + TS-only cosine)
-# ================================
+
+# modelling -overall cosine- and -total_sales_only cosine-
 ALPHA, BETA, GAMMA, DELTA = 1.0, 0.6, 0.3, 1.2
 
 CAT_COLS = ["brand","first_category","second_category","third_category","fourth_category"]
@@ -157,7 +149,7 @@ class ProductSimilarityModel:
 
         self.df = None
         self.X_all = None
-        self.X_ts_unit = None   # TS-only için ünit norm (delta UYGULANMAZ)
+        self.X_ts_unit = None   #unit norm for ts-only, no delta
         self.nn = None
         self.ts_cols = None
 
@@ -169,28 +161,28 @@ class ProductSimilarityModel:
         self.df = df_prod.reset_index(drop=True).copy()
         self.ts_cols = _split_ts_cols(self.df)
 
-        # --- TEXT ---
+        # text similarity
         X_text = self.tfidf.fit_transform(self.df["semantic_text"].astype(str))
         X_text = normalize(X_text).astype(np.float32) * self.alpha
         s0, e0 = 0, X_text.shape[1]
 
-        # --- CATEGORICAL ---
+        # category similarity
         X_cat = self.ohe.fit_transform(self.df[CAT_COLS].astype(str))
         X_cat = normalize(X_cat).astype(np.float32) * self.beta
         s1, e1 = e0, e0 + X_cat.shape[1]
 
-        # --- NUMERIC ---
+        # numeric similarity 
         num = self.df[NUM_BASE_COLS].astype(np.float32).to_numpy()
         X_num = csr_matrix(self.scaler.fit_transform(num).astype(np.float32)) * self.gamma
         s2, e2 = e1, e1 + X_num.shape[1]
 
-        # --- TS SHAPE ---
+        # total sales time series shape similarity
         X_ts_raw = csr_matrix(self.df[self.ts_cols].astype(np.float32).to_numpy())
         self.X_ts_unit = normalize(X_ts_raw, norm="l2", axis=1, copy=True).astype(np.float32)   # TS-only
         X_ts = normalize(X_ts_raw, norm="l2", axis=1, copy=True).astype(np.float32) * self.delta # overall
         s3, e3 = e2, e2 + X_ts.shape[1]
 
-        # Birleştir + satır L2 norm
+        # L2 norm and distances
         X = hstack([X_text, X_cat, X_num, X_ts]).tocsr()
         self.X_all = normalize(X, norm="l2", axis=1, copy=False)
 
@@ -259,13 +251,11 @@ class ProductSimilarityModel:
             rows.append(row)
         return pd.DataFrame(rows)
 
-# ================================
-# 5) Streamlit UI
-# ================================
+#streamlit dashboard integration
 st.set_page_config(page_title="Kampanya Satış Şekline Göre Benzer Ürünler", layout="wide")
 st.title("📈 14 Gün Kampanya Satış Şekli + İçerik Benzerliği")
 
-# Küçük metin stili (sub item'lar için)
+
 st.markdown("""
 <style>
 .small {font-size: 13px; opacity: 0.9;}
@@ -287,7 +277,6 @@ if uploaded:
     raw, day_cols = load_campaign_excel(uploaded)
     st.success(f"{len(raw):,} satır yüklendi • Gün kolonları: {', '.join(day_cols[:3])} ...")
 
-    # ---- Kapsam seçimi (sidebar) ----
     st.sidebar.markdown("### Kapsam")
     scope = st.sidebar.radio("Benzerlik kapsamı", ["Tüm mağazalar (agregat)", "Belirli mağaza"])
     selected_store = None
@@ -308,7 +297,6 @@ if uploaded:
 
     tab1, tab2, tab3 = st.tabs(["🔍 Tek ürün arama", "📋 Toplu benzerlik (liste)", "🗺 Harita (SVD)"])
 
-    # ---------------------- TAB 1 ----------------------
     with tab1:
         options = [f"{row['product_id']} - {row['product_name']}" for _, row in prod.iterrows()]
         sel = st.selectbox("Ürün seç", options)
@@ -342,12 +330,11 @@ if uploaded:
             except Exception as e:
                 st.error(str(e))
 
-    # ---------------------- TAB 2: GRUPLU LİSTE ----------------------
+ 
     with tab2:
         view = st.radio("Görünüm (View)", ["Liste", "Tablo"], horizontal=True)
         k_for_all = st.slider("Her ürün için benzer sayısı", 1, 5, 3, key="k_all")
 
-        # hesapla
         all_df = model.search_all_wide(k=k_for_all)
         st.write(f"Toplam {len(all_df)} ürün")
 
@@ -358,7 +345,6 @@ if uploaded:
                     show_df[c] = show_df[c].map(lambda v: f"{v:.2f}")
             st.dataframe(show_df, use_container_width=True)
         else:
-            # Liste görünümü
             for _, row in all_df.iterrows():
                 st.markdown(
                     f"<div class='product rowpad'>🔎 {row['product_id']} — {row['product_name']}</div>",
@@ -378,7 +364,6 @@ if uploaded:
                     )
                 st.markdown("<hr style='opacity:0.15;'>", unsafe_allow_html=True)
 
-        # İndirme butonu
         buf = io.BytesIO()
         all_df.to_excel(buf, index=False)
         buf.seek(0)
@@ -389,7 +374,6 @@ if uploaded:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    # ---------------------- TAB 3 ----------------------
     with tab3:
         svd = TruncatedSVD(n_components=2, random_state=42)
         coords = svd.fit_transform(model.X_all)
@@ -474,3 +458,4 @@ if uploaded:
                 hovermode=False
             )
             st.plotly_chart(fig, use_container_width=True)
+
